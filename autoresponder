@@ -1,0 +1,83 @@
+#! /usr/bin/python3
+
+import imaplib
+import smtplib
+import email
+from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timedelta, timezone
+import time
+
+IMAP_SERVER = 'IMAP_SERVER'
+SMTP_SERVER = 'SMTP_SERVER'
+EMAIL = 'user@example.com'
+PASSWORD = 'password'  # Ideally store in a secure file or env var
+MAX_REPLY_INTERVAL = timedelta(days=1)
+LOGFILE = '/var/log/email_autoresponder.log'
+
+replied_to = {}
+
+def fetch_unread():
+    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+    mail.login(EMAIL, PASSWORD)
+    mail.select('inbox')
+    typ, data = mail.search(None, '(UNSEEN)')
+    ids = data[0].split()
+    for num in ids:
+        typ, msg_data = mail.fetch(num, '(RFC822)')
+        for response_part in msg_data:
+            if isinstance(response_part, tuple):
+                msg = email.message_from_bytes(response_part[1])
+                sender = email.utils.parseaddr(msg['From'])[1]
+                if not sender:
+                    continue
+
+                # Check if we already emailed this sender recently
+                now = datetime.now(timezone.utc)
+                last_sent = replied_to.get(sender)
+                if last_sent and now - last_sent < MAX_REPLY_INTERVAL:
+                    continue  # skip — already replied within 24 hours
+
+                # Check the date of the message
+                try:
+                    msg_date = parsedate_to_datetime(msg['Date'])
+                except Exception:
+                    continue  # skip if no valid date
+
+                if now - msg_date > MAX_REPLY_INTERVAL:
+                    continue  # skip — too old
+
+                # Send reply and update log
+                send_autoreply(sender)
+                replied_to[sender] = now
+
+def send_autoreply(to_address):
+    msg = EmailMessage()
+    msg['Subject'] = 'Re: Your email to user@example.com'
+    msg['From'] = EMAIL
+    msg['To'] = to_address
+    msg['Auto-Submitted'] = 'auto-replied'
+    msg.set_content('Thank you for your message.')
+
+    timestamp = datetime.now().isoformat()
+
+    log_entry = f"[{timestamp}] Sent auto-reply to: {to_address}"
+    print(log_entry)
+
+    try:
+        with open(LOGFILE, 'a') as f:
+            f.write(log_entry + '\n')
+    except Exception as e:
+        print(f"Failed to write log: {e}")
+
+    try:
+        with smtplib.SMTP_SSL(SMTP_SERVER, 465) as smtp:
+            smtp.login(EMAIL, PASSWORD)
+            smtp.send_message(msg)
+    except Exception as e:
+        print(f"Failed to send to {to_address}: {e}")
+
+if __name__ == '__main__':
+    while True:
+        fetch_unread()
+        time.sleep(60)
